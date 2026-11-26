@@ -141,63 +141,136 @@ python analyse_image.py video_1.mp4 --roi 150,200,400,215 \
 
 ## 5. Principe de fonctionnement
 
-Le traitement suit quatre étapes :
+Le programme ne « voit » pas le demi-cylindre comme nous. Pour lui, une vidéo est une suite d'images, et chaque image est un tableau de pixels. Il travaille en quatre étapes :
 
 ```
-vidéo  →  une mesure d'angle par image  →  courbe θ(t)  →  instants des extrêmes  →  période
+1. lire la vidéo            → une image toutes les 1/fps secondes
+2. isoler le demi-cylindre  → une tache blanche sur fond noir
+3. mesurer son inclinaison  → un angle θ par image
+4. analyser θ(t)            → les instants des extrêmes → la période
 ```
 
-### 5.1 Lecture de la vidéo et du temps
+### 5.1 Lire la vidéo et connaître le temps
 
-La vidéo est lue image par image avec **OpenCV**. Le temps n'est pas mesuré : il est **calculé** à partir du numéro de l'image et de la cadence :
+La vidéo est lue image par image avec la bibliothèque **OpenCV**. Le temps n'est pas chronométré, il est **déduit du numéro de l'image** :
 
-$$t = \frac{n^\circ\ \text{image}}{\text{fps}}$$
+$$t = \frac{\text{numéro de l'image}}{\text{fps}}$$
 
-À 60 images/s, deux images successives sont séparées de 16,7 ms.
+Par exemple, à 60 images par seconde, l'image n° 30 correspond à t = 0,5 s, et deux images successives sont séparées de 1/60 s ≈ 16,7 ms.
+
+C'est pour ça que la cadence doit être **juste**. Si elle est fausse, tous les temps et la période sont faux dans la même proportion (voir § 6.4 pour les vidéos au ralenti).
 
 ### 5.2 Isoler le demi-cylindre
 
-Chaque image est réduite à la zone de travail, puis légèrement floutée pour atténuer le bruit du capteur. Le programme fabrique ensuite un **masque binaire** : en blanc l'objet, en noir le reste. Il y a deux façons de le faire :
+Le programme doit d'abord décider, pour chaque pixel, s'il appartient au demi-cylindre ou non. Il fabrique ainsi une image en **noir et blanc**, appelée *masque* :
+- **blanc** = demi-cylindre ;
+- **noir** = tout le reste (fond, sol, ombre…).
 
-- **Par la couleur** (quand le cylindre a été sélectionné). La couleur moyenne du petit rectangle tracé sur l'objet est mémorisée. Un pixel est gardé si sa couleur en est assez proche, à la *tolérance* près. Les couleurs sont comparées dans l'espace **CIE Lab**, où l'écart entre deux couleurs correspond à peu près à la différence perçue par l'œil.
-- **Par le niveau de gris** (sans sélection). Les pixels plus sombres (ou plus clairs) qu'un seuil sont gardés. Si le seuil vaut 0, il est choisi automatiquement par la **méthode d'Otsu**, qui cherche le seuil séparant le mieux les deux populations de gris de l'image.
+C'est ce masque qu'on voit à droite dans « Voir l'image traitée ». Il y a deux façons de le construire.
 
-Une opération morphologique, l'*ouverture*, retire les petits points isolés. Avec la sélection par couleur, une *fermeture* bouche aussi les petits trous. Le programme garde ensuite **le plus grand contour**, qui est le demi-cylindre. C'est le **contour vert**.
+**a) Par la couleur** (quand vous avez sélectionné le cylindre)
+Le programme mesure la couleur moyenne du petit rectangle que vous avez tracé sur l'objet. Ensuite, sur chaque image, il garde en blanc tous les pixels dont la couleur est **proche** de celle-ci. Le curseur *Tolérance* fixe à partir de quand un pixel est jugé « trop différent ».
+Une ombre grise ou un fond clair ont une couleur différente de l'objet, donc ils restent noirs.
 
-### 5.3 Mesurer l'angle : les moments d'image
+> Les couleurs sont comparées dans un système appelé **Lab**, conçu pour que l'écart entre deux couleurs corresponde à peu près à la différence que perçoit notre œil. C'est plus fiable que de comparer directement le rouge, le vert et le bleu.
 
-Les **moments** de la forme sont des sommes calculées sur tous ses pixels, comme en mécanique :
+**b) Par le niveau de gris** (sans sélection)
+L'image est passée en niveaux de gris (de 0 = noir à 255 = blanc). Tous les pixels plus sombres qu'un **seuil** sont gardés, ou plus clairs si l'objet est clair sur fond sombre. Si le seuil vaut 0, le programme le choisit seul avec la **méthode d'Otsu** : il cherche la valeur qui sépare le mieux les pixels « sombres » des pixels « clairs » de l'image.
 
-- le moment d'ordre 0, $m_{00}$, est l'**aire** ;
-- les moments d'ordre 1 donnent le **centre de gravité** de la forme : $x_G = m_{10}/m_{00}$ et $y_G = m_{01}/m_{00}$ ;
-- les moments centrés d'ordre 2, $\mu_{20}$, $\mu_{02}$ et $\mu_{11}$, jouent le rôle des moments d'inertie. Ils indiquent dans quelle direction la forme est la plus étalée.
+**Nettoyage.** Le masque contient souvent quelques pixels blancs isolés dus au bruit de la caméra. Une opération de nettoyage les efface. Avec la sélection par couleur, une seconde opération bouche aussi les petits trous dans l'objet.
+Enfin, s'il reste plusieurs taches blanches, le programme garde **la plus grande** : c'est le demi-cylindre. Son contour est le **contour vert** affiché sur la vidéo.
 
-L'angle de l'**axe principal** de la forme s'en déduit :
+### 5.3 Mesurer l'inclinaison de la tache
+
+À ce stade, le programme ne connaît qu'une **liste de pixels blancs**, chacun avec ses coordonnées (x, y). Il ne sait pas où est la face plane. Il doit déduire l'inclinaison de la tache seulement à partir de ces points.
+
+#### Étape 1 : trouver le centre de la tache
+
+On fait la **moyenne des positions** de tous les pixels blancs :
+
+$$x_G = \text{moyenne des } x \qquad y_G = \text{moyenne des } y$$
+
+C'est le **centre de gravité** de la forme, comme si chaque pixel était un petit grain de même masse. C'est le **point rouge** au milieu de la ligne rouge.
+
+> En traitement d'image, on appelle ces sommes des **moments** :
+> - m₀₀ = nombre de pixels blancs, c'est-à-dire l'aire de la tache ;
+> - m₁₀ = somme des x, et m₀₁ = somme des y.
+>
+> Le centre vaut donc x_G = m₁₀ / m₀₀ et y_G = m₀₁ / m₀₀.
+
+#### Étape 2 : trouver dans quelle direction la tache s'étale
+
+Imaginez un crayon posé de travers sur une table. Si l'on regarde comment ses points sont répartis autour de son centre :
+- **le long du crayon**, ils sont très étalés ;
+- **en travers**, ils sont serrés.
+
+La direction dans laquelle les points sont **le plus étalés** s'appelle l'**axe principal**. C'est elle qui indique l'inclinaison.
+
+Pour la trouver, le programme calcule l'écart (dx, dy) de chaque pixel blanc au centre, puis trois nombres :
+
+| Nombre | Calcul | Ce qu'il indique |
+|---|---|---|
+| μ₂₀ | somme des dx² | l'étalement **horizontal** |
+| μ₀₂ | somme des dy² | l'étalement **vertical** |
+| μ₁₁ | somme des dx · dy | si la forme **penche**, et de quel côté |
+
+Pour μ₁₁ :
+- si les pixels situés à droite du centre sont plutôt en haut, et ceux de gauche plutôt en bas, les produits dx·dy sont surtout d'un même signe et μ₁₁ est nettement positif ou négatif ;
+- si la forme penche dans l'autre sens, μ₁₁ change de signe ;
+- si la forme est bien droite, les contributions se compensent et μ₁₁ vaut 0.
+
+Une formule classique combine ces trois nombres et donne l'angle de l'axe principal :
 
 $$\theta = \frac{1}{2}\arctan\left(\frac{2\,\mu_{11}}{\mu_{20}-\mu_{02}}\right)$$
 
-Vu de profil, un demi-cylindre est un demi-disque. Il est deux fois plus large que haut, donc son axe principal est **parallèle à la face plane**. C'est la **ligne rouge**, tracée à partir du centre de gravité, qui est le point rouge.
+Pas besoin de la retenir. C'est la même formule qui donne les **axes d'inertie** d'un solide en mécanique : la direction autour de laquelle il est le plus facile de le faire tourner.
 
-Quelques propriétés de cette mesure :
-- elle utilise **tous les pixels** de la forme et pas seulement quelques points du bord, donc elle est peu sensible au bruit ;
-- elle ne dépend **pas de la position** de l'objet. Le demi-cylindre se déplace un peu en roulant, et ça ne change pas l'angle mesuré ;
-- un axe n'a pas de sens, donc l'angle pourrait sauter de 180° d'une image à l'autre. Le programme corrige ces sauts en comparant chaque angle au précédent.
+#### Étape 3 : pourquoi cet axe est la face plane
+
+Vu de profil, le demi-cylindre est un **demi-disque** de rayon R :
+- il mesure **2R de large**, le long de la face plane ;
+- mais seulement **R de haut**.
+
+Il est donc deux fois plus étalé le long de sa face plane, et son axe principal est **parallèle à la face plane**. Quand le demi-cylindre bascule, sa face plane bascule, l'axe principal aussi, et l'angle θ suit exactement l'inclinaison de l'objet.
+
+C'est cet axe qui est dessiné en **ligne rouge** sur la vidéo.
+
+#### En résumé
+
+1. Moyenne des positions des pixels blancs → **centre** (point rouge).
+2. Direction dans laquelle les pixels sont le plus étalés autour de ce centre → **axe principal** (ligne rouge).
+3. Pour un demi-disque, cet axe est la face plane, et son angle avec l'horizontale est **θ**.
+
+Ce calcul est répété sur chaque image, ce qui donne **θ en fonction du temps**.
+
+#### Pourquoi cette méthode est robuste
+
+- Elle utilise **tous les pixels** de la forme et pas seulement quelques points du bord. Si quelques pixels sont mal détectés, le résultat change à peine.
+- Elle ne dépend **pas de la position** de l'objet. Le demi-cylindre se déplace un peu en roulant, et ça ne change pas l'angle mesuré.
+- Un axe n'a pas de sens : « incliné de 10° » et « incliné de 190° » désignent la même droite. Le programme compare chaque angle au précédent pour éviter les sauts de 180° d'une image à l'autre.
 
 ### 5.4 De la courbe θ(t) à la période
 
-1. **Trous.** Les images où l'objet n'a pas été trouvé sont remplacées par une interpolation linéaire entre leurs voisines.
-2. **Lissage.** Chaque point est remplacé par une moyenne glissante sur 5 images.
-3. **Extrêmes.** Les maxima puis les minima sont détectés (`scipy.signal.find_peaks`). Deux critères écartent les faux pics dus au bruit :
-   - la *proéminence* : un pic doit dépasser ses voisins d'au moins 15 % de l'amplitude totale ;
-   - la *distance* : deux pics doivent être séparés d'au moins 60 % de l'écart habituel entre pics.
-4. **Précision inférieure à une image.** Le vrai sommet tombe rarement pile sur une image. Une **parabole** est ajustée sur le pic et ses deux voisins, et l'instant de son sommet est retenu. On obtient ainsi l'instant de l'extrême avec une précision meilleure que 1/fps.
-5. **Période.** Le programme calcule toutes les durées entre deux maxima successifs et entre deux minima successifs. La période est leur **moyenne** :
+On dispose maintenant d'une courbe θ(t) qui oscille, avec un point par image. La période est le temps qu'il faut pour revenir au **même extrême**.
 
-$$T = \overline{\Delta t}$$
+**1. Combler les trous.** Si l'objet n'a pas été trouvé sur quelques images, la valeur manquante est estimée à partir des images voisines.
 
-6. **Incertitude.** C'est une incertitude-type de type A, calculée à partir de la dispersion des $N$ périodes mesurées :
+**2. Lisser.** Chaque point est remplacé par la moyenne de lui-même et de ses 4 voisins (2 avant, 2 après). Ça efface le petit tremblement de la mesure sans déplacer les sommets de la courbe.
+
+**3. Trouver les sommets.** Le programme repère les **maxima** (l'objet est au plus loin d'un côté) et les **minima** (au plus loin de l'autre côté). Pour ne pas prendre un petit soubresaut pour un vrai sommet, il impose deux règles :
+- un sommet doit dépasser ses voisins d'au moins **15 % de l'amplitude** totale ;
+- deux sommets doivent être séparés d'au moins **60 % de l'écart habituel** entre sommets.
+
+**4. Placer chaque sommet plus précisément qu'une image.** Le vrai sommet tombe rarement pile sur une image : il est souvent entre deux. Le programme fait passer une **parabole** par le point le plus haut et ses deux voisins, puis prend le sommet de cette parabole. On obtient ainsi l'instant du maximum avec une précision **meilleure que la durée d'une image**.
+
+**5. Calculer la période.** Le programme mesure toutes les durées entre deux maxima successifs, puis entre deux minima successifs. La période **T** est la **moyenne** de toutes ces durées. Pour 10 oscillations filmées, on obtient environ 20 mesures de la période.
+
+**6. Calculer l'incertitude.** Les périodes mesurées ne sont pas toutes identiques : elles sont un peu dispersées autour de la moyenne. Leur **écart-type** σ mesure cette dispersion. L'incertitude sur la moyenne vaut :
 
 $$u(T) = \frac{\sigma}{\sqrt{N}}$$
+
+où N est le nombre de périodes mesurées. C'est une incertitude de **type A** (obtenue par répétition des mesures). Plus on filme d'oscillations, plus N est grand et plus l'incertitude est petite.
+
 
 ---
 
